@@ -189,11 +189,11 @@ jobs:
               });
             }
 
-      - name: 上传诊断日志
+      - name: 上传前端诊断日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Deskemy-zh-CN-diagnostics
+          name: Deskemy-zh-CN-frontend-diagnostics
           if-no-files-found: warn
           retention-days: 14
           path: |
@@ -208,8 +208,95 @@ jobs:
           exit 1
 
       - name: 构建 NSIS 安装包
+        id: tauri_build
         working-directory: deskemy
-        run: npm run tauri build -- --bundles nsis
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          npm run tauri build -- --bundles nsis 2>&1 | Tee-Object -FilePath ../tauri-build.log
+          $code = $LASTEXITCODE
+          "exit_code=$code" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - name: 记录 Tauri 构建错误
+        if: steps.tauri_build.outputs.exit_code != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '自动诊断：Tauri 构建失败';
+            let log = fs.readFileSync('tauri-build.log', 'utf8');
+            if (log.length > 55000) log = log.slice(-55000);
+            const body = [
+              `工作流运行：${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              `上游版本：${process.env.UPSTREAM_REF}`,
+              '',
+              '```text',
+              log,
+              '```',
+            ].join('\n');
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
+
+      - name: 关闭已解决的 Tauri 构建 Issue
+        if: steps.tauri_build.outputs.exit_code == '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '自动诊断：Tauri 构建失败';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            }
+
+      - name: 上传 Tauri 构建日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deskemy-zh-CN-tauri-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+          path: tauri-build.log
+
+      - name: Tauri 构建失败
+        if: steps.tauri_build.outputs.exit_code != '0'
+        shell: pwsh
+        run: |
+          Get-Content tauri-build.log
+          exit 1
 
       - name: 制作便携版
         shell: pwsh
