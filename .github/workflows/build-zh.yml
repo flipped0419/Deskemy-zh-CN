@@ -1,0 +1,56 @@
+name: 构建 Deskemy 中文版
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 官方 Deskemy 标签或分支
+        required: true
+        default: v1.1.0
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 检出汉化仓库
+        uses: actions/checkout@v4
+
+      - name: 检出官方源码
+        uses: actions/checkout@v4
+        with:
+          repository: NFRohan/Deskemy
+          ref: ${{ inputs.upstream_ref }}
+          path: deskemy
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 应用汉化
+        shell: pwsh
+        run: node scripts/localize-zh.mjs deskemy
+
+      - name: 安装依赖
+        working-directory: deskemy
+        run: npm ci
+
+      - name: 检查
+        working-directory: deskemy
+        run: npm run check
+
+      - name: 构建
+        working-directory: deskemy
+        run: npm run tauri build
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deskemy-zh-CN
+          path: deskemy/src-tauri/target/release/bundle/**
