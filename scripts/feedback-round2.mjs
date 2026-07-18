@@ -61,51 +61,10 @@ patchText("src/routes/settings/+page.svelte", [
   ['re-index anytime with "Index subtitle text" above.', "随时可以使用上方的“索引字幕文本”重新建立。"],
 ]);
 
-patchText("src/routes/course/[id]/+page.svelte", [
-  [
-    /function flat\(c: CourseDetail\): Lecture\[\] \{\n\s*return c\.sections\.flatMap\(\(s\) => s\.lectures\);\n\s*\}/,
-    `function flat(c: CourseDetail): Lecture[] {
-    return c.sections.flatMap((s) => s.lectures);
-  }
-
-  function displaySectionTitle(section: Section, index: number): string {
-    const normalized = section.title.trim().toLowerCase();
-    if (index === 0 && (normalized === "introduction" || normalized === "intro")) return "01";
-    return section.title;
-  }`,
-    "增加课程详情页根目录章节编号显示",
-  ],
-  [
-    "{#each course.sections as section (section.id)}",
-    "{#each course.sections as section, sectionIndex (section.id)}",
-    "取得课程章节序号",
-  ],
-  [
-    '<span class="text-headline-sm text-on-surface truncate">{section.title}</span>',
-    '<span class="text-headline-sm text-on-surface truncate">{displaySectionTitle(section, sectionIndex)}</span>',
-    "课程详情页根目录章节显示为 01",
-  ],
-]);
-
 patchText("src/routes/watch/[lectureId]/+page.svelte", [
-  [
-    /(const panelItem\s*=\s*\n\s*"[^"]+";)/,
-    `$1
-
-  function displaySectionTitle(section: { id: string; title: string } | null): string {
-    if (!section) return "";
-    const normalized = section.title.trim().toLowerCase();
-    const index = course?.sections.findIndex((item) => item.id === section.id) ?? -1;
-    if (index === 0 && (normalized === "introduction" || normalized === "intro")) return "01";
-    return section.title;
-  }`,
-    "增加播放器根目录章节编号显示",
-  ],
   [
     />\s*Content\s*<\/button>/,
     ">\n                课程目录\n              </button>",
     "播放器侧栏课程目录标签",
   ],
-  ["{currentSection.title}", "{displaySectionTitle(currentSection)}"],
-  ["{section.title}", "{displaySectionTitle(section)}"],
 ]);
