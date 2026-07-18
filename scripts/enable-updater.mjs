@@ -130,6 +130,8 @@ function replaceRequired(text, pattern, replacement, label) {
   const packagePath = path.join(root, "package.json");
   const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
   pkg.version = version;
+  pkg.scripts ??= {};
+  pkg.scripts.check = "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --threshold error";
   fs.writeFileSync(packagePath, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
 }
 
