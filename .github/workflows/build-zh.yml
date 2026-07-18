@@ -120,7 +120,7 @@ jobs:
         continue-on-error: true
         run: |
           npm run check 2>&1 | Tee-Object -FilePath ../svelte-check.log
-          $hasErrors = Select-String -Path ../svelte-check.log -Pattern "Error" -SimpleMatch
+          $hasErrors = Select-String -Path ../svelte-check.log -Pattern "Error" -SimpleMatch -CaseSensitive
           $code = if ($hasErrors) { 1 } else { 0 }
           "exit_code=$code" >> $env:GITHUB_OUTPUT
           exit 0
