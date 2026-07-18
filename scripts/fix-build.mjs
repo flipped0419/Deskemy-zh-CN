@@ -134,6 +134,26 @@ patchRequired(
   "处理课程路由参数可能为空",
 );
 
+// 当前依赖组合会把“let state = $state(...)”中的 $state 误判为旧式
+// store 订阅。只重命名播放器内部变量，避免与 Svelte 5 rune 产生歧义。
+{
+  const relativePath = "src/routes/watch/[lectureId]/+page.svelte";
+  const filePath = path.join(root, relativePath);
+  let source = fs.readFileSync(filePath, "utf8");
+  const oldDeclaration = "let state = $state<PlayerState>({";
+  const newDeclaration = "let playerState = $state<PlayerState>({";
+
+  if (source.includes(oldDeclaration)) {
+    source = source.replace(oldDeclaration, newDeclaration);
+    source = source.replaceAll("state.", "playerState.");
+    source = source.replace(/\bstate\s*=/g, "playerState =");
+    fs.writeFileSync(filePath, source, "utf8");
+    console.log("已应用构建修复：重命名播放器内部 state 变量，避免与 $state rune 歧义");
+  } else if (!source.includes(newDeclaration)) {
+    throw new Error(`构建修复未命中：播放器 state 变量重命名（${relativePath}）`);
+  }
+}
+
 await ensureLibmpv();
 await import("./feedback-fixes.mjs");
 await import("./feedback-round2.mjs");
