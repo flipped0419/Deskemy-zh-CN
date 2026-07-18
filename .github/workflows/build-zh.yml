@@ -20,6 +20,7 @@ env:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   build-windows:
@@ -71,8 +72,74 @@ jobs:
           }
 
       - name: 检查前端代码
+        id: frontend_check
         working-directory: deskemy
-        run: npm run check
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          npm run check 2>&1 | Tee-Object -FilePath ../svelte-check.log
+          $code = $LASTEXITCODE
+          "exit_code=$code" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - name: 记录前端检查错误
+        if: steps.frontend_check.outputs.exit_code != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const title = '自动诊断：前端检查失败';
+            let log = fs.readFileSync('svelte-check.log', 'utf8');
+            if (log.length > 55000) log = log.slice(-55000);
+            const body = [
+              `工作流运行：${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              `上游版本：${process.env.UPSTREAM_REF}`,
+              '',
+              '```text',
+              log,
+              '```',
+            ].join('\n');
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
+
+      - name: 上传诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deskemy-zh-CN-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            svelte-check.log
+            deskemy/LOCALIZATION_REPORT.md
+
+      - name: 前端检查失败
+        if: steps.frontend_check.outputs.exit_code != '0'
+        shell: pwsh
+        run: |
+          Get-Content svelte-check.log
+          exit 1
 
       - name: 构建 NSIS 安装包
         working-directory: deskemy
