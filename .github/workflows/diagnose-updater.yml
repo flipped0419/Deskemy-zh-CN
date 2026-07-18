@@ -49,6 +49,7 @@ jobs:
           node localization/scripts/localize-zh.mjs deskemy
           node localization/scripts/fix-build.mjs deskemy
           node localization/scripts/enable-updater.mjs deskemy
+          Copy-Item -LiteralPath 'deskemy/src/routes/watch/[lectureId]/+page.svelte' -Destination 'updater-watch-page.svelte' -Force
 
       - name: 安装依赖
         working-directory: deskemy
@@ -135,7 +136,7 @@ jobs:
           name: updater-svelte-check
           path: |
             updater-svelte-check.log
-            deskemy/src/routes/watch/[lectureId]/+page.svelte
+            updater-watch-page.svelte
           retention-days: 14
 
       - name: 检查失败
