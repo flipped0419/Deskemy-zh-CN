@@ -59,7 +59,9 @@ jobs:
 
       - name: 应用简体中文汉化
         shell: pwsh
-        run: node localization/scripts/localize-zh.mjs deskemy
+        run: |
+          node localization/scripts/localize-zh.mjs deskemy
+          node localization/scripts/fix-build.mjs deskemy
 
       - name: 安装前端依赖
         working-directory: deskemy
