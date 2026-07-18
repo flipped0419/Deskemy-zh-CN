@@ -117,7 +117,9 @@ function replaceRequired(text, pattern, replacement, label) {
   const configPath = path.join(root, "src-tauri", "tauri.conf.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
   config.version = version;
-  config.bundle.createUpdaterArtifacts = true;
+  // 现有发布工作流使用 Windows 的 *.nsis.zip 更新包。
+  // Tauri 2 只有 v1Compatible 模式会生成该归档及对应签名。
+  config.bundle.createUpdaterArtifacts = "v1Compatible";
   config.plugins ??= {};
   config.plugins.updater ??= {};
   config.plugins.updater.pubkey = publicKey;
