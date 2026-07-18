@@ -1,0 +1,222 @@
+name: 发布 Deskemy 中文版更新
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "官方 Deskemy 标签、分支或提交"
+        required: true
+        default: "v1.1.0"
+        type: string
+      version:
+        description: "中文版 SemVer；必须高于已发布版本"
+        required: true
+        default: "1.1.1"
+        type: string
+      release_notes:
+        description: "本次中文版更新说明"
+        required: true
+        default: "完善简体中文翻译与运行兼容性。"
+        type: string
+      draft:
+        description: "先创建草稿 Release，测试后再手动发布"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: deskemy-zh-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REF: ${{ inputs.upstream_ref }}
+  DESKEMY_ZH_VERSION: ${{ inputs.version }}
+  RELEASE_NOTES: ${{ inputs.release_notes }}
+  TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+
+jobs:
+  release-windows:
+    name: 构建并发布 Windows 中文更新
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: 检查更新签名配置
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if (-not $env:TAURI_UPDATER_PUBLIC_KEY) {
+            throw "缺少仓库变量 TAURI_UPDATER_PUBLIC_KEY"
+          }
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "缺少仓库 Secret：TAURI_SIGNING_PRIVATE_KEY"
+          }
+          if ("${{ inputs.version }}" -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "version 必须是有效的 SemVer，例如 1.1.1"
+          }
+
+      - name: 检出汉化仓库
+        uses: actions/checkout@v4
+        with:
+          path: localization
+          persist-credentials: false
+
+      - name: 检出官方 Deskemy 源码
+        uses: actions/checkout@v4
+        with:
+          repository: NFRohan/Deskemy
+          ref: ${{ env.UPSTREAM_REF }}
+          path: deskemy
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 设置 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: deskemy/src-tauri -> target
+
+      - name: 应用汉化并启用中文版更新
+        shell: pwsh
+        run: |
+          node localization/scripts/localize-zh.mjs deskemy
+          node localization/scripts/fix-build.mjs deskemy
+          node localization/scripts/enable-updater.mjs deskemy
+
+      - name: 安装前端依赖
+        working-directory: deskemy
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
+
+      - name: 检查前端代码
+        working-directory: deskemy
+        run: npm run check
+
+      - name: 构建带签名的 NSIS 更新包
+        working-directory: deskemy
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles nsis
+
+      - name: 制作便携版和 latest.json
+        id: release_meta
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "release-output"
+          $portable = Join-Path $out "Deskemy-zh-CN-portable"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+
+          $exe = Get-ChildItem "deskemy/src-tauri/target/release" -Filter "deskemy.exe" -File | Select-Object -First 1
+          if (-not $exe) { throw "未找到 deskemy.exe" }
+          Copy-Item $exe.FullName (Join-Path $portable "Deskemy.exe")
+
+          $mpv = "deskemy/src-tauri/vendor/libmpv-2.dll"
+          if (-not (Test-Path $mpv)) { throw "未找到 libmpv-2.dll" }
+          Copy-Item $mpv $portable
+          New-Item -ItemType File -Force -Path (Join-Path $portable ".portable") | Out-Null
+          Copy-Item "deskemy/LICENSE" $portable
+          if (Test-Path "deskemy/src-tauri/licenses") {
+            Copy-Item "deskemy/src-tauri/licenses" (Join-Path $portable "licenses") -Recurse
+          }
+
+          $portableZip = Join-Path $out "Deskemy_$env:DESKEMY_ZH_VERSION`_zh-CN_portable.zip"
+          Compress-Archive -Path "$portable/*", (Join-Path $portable ".portable") -DestinationPath $portableZip -Force
+
+          $installer = Get-ChildItem "deskemy/src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" -File | Select-Object -First 1
+          if (-not $installer) { throw "未找到 NSIS 安装包" }
+          $signaturePath = "$($installer.FullName).sig"
+          if (-not (Test-Path $signaturePath)) { throw "未找到更新签名：$signaturePath" }
+
+          $tag = "v$env:DESKEMY_ZH_VERSION-zh-CN"
+          $assetName = $installer.Name
+          $encodedAssetName = [Uri]::EscapeDataString($assetName)
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$encodedAssetName"
+          $signature = (Get-Content $signaturePath -Raw).Trim()
+          $notes = @(
+            $env:RELEASE_NOTES
+            ""
+            "更新来源：flipped0419/Deskemy-zh-CN 中文翻译仓库，不是 NFRohan/Deskemy 官方英文版仓库。"
+            "基于官方源码：$env:UPSTREAM_REF"
+          ) -join "`n"
+
+          $manifest = [ordered]@{
+            version = $env:DESKEMY_ZH_VERSION
+            notes = $notes
+            pub_date = [DateTime]::UtcNow.ToString("o")
+            platforms = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                signature = $signature
+                url = $downloadUrl
+              }
+            }
+          }
+          $latestPath = Join-Path $out "latest.json"
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $latestPath -Encoding utf8NoBOM
+
+          $notesPath = Join-Path $out "RELEASE_NOTES.md"
+          $notes | Set-Content -Path $notesPath -Encoding utf8NoBOM
+          Copy-Item $installer.FullName $out
+          Copy-Item $signaturePath $out
+          Copy-Item "deskemy/LOCALIZATION_REPORT.md" $out
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "installer=$($installer.Name)" >> $env:GITHUB_OUTPUT
+          "portable=$([IO.Path]::GetFileName($portableZip))" >> $env:GITHUB_OUTPUT
+
+      - name: 创建中文版 GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.release_meta.outputs.tag }}"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $tag 已存在。请提高 version 后重新运行，避免覆盖已经分发的更新。"
+          }
+
+          $args = @(
+            "release", "create", $tag,
+            "release-output/${{ steps.release_meta.outputs.installer }}",
+            "release-output/${{ steps.release_meta.outputs.installer }}.sig",
+            "release-output/${{ steps.release_meta.outputs.portable }}",
+            "release-output/latest.json",
+            "release-output/LOCALIZATION_REPORT.md",
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--target", $env:GITHUB_SHA,
+            "--title", "Deskemy 中文版 $env:DESKEMY_ZH_VERSION",
+            "--notes-file", "release-output/RELEASE_NOTES.md"
+          )
+          if ("${{ inputs.draft }}" -eq "true") { $args += "--draft" }
+          & gh @args
+          if ($LASTEXITCODE -ne 0) { throw "创建 GitHub Release 失败" }
+
+      - name: 上传发布诊断产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deskemy-${{ inputs.version }}-zh-CN-release-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            release-output/latest.json
+            release-output/LOCALIZATION_REPORT.md
