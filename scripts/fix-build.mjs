@@ -136,3 +136,4 @@ patchRequired(
 
 await ensureLibmpv();
 await import("./feedback-fixes.mjs");
+await import("./feedback-round2.mjs");
