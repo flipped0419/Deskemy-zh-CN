@@ -142,15 +142,24 @@ jobs:
           $portableZip = Join-Path $out "Deskemy_$env:DESKEMY_ZH_VERSION`_zh-CN_portable.zip"
           Compress-Archive -Path "$portable/*", (Join-Path $portable ".portable") -DestinationPath $portableZip -Force
 
-          $installer = Get-ChildItem "deskemy/src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" -File | Select-Object -First 1
-          if (-not $installer) { throw "未找到 NSIS 安装包" }
-          $signaturePath = "$($installer.FullName).sig"
-          if (-not (Test-Path $signaturePath)) { throw "未找到更新签名：$signaturePath" }
+          $nsisDir = "deskemy/src-tauri/target/release/bundle/nsis"
+          $installer = Get-ChildItem $nsisDir -Filter "*-setup.exe" -File | Select-Object -First 1
+          if (-not $installer) { throw "未找到供手动安装的 NSIS 安装包" }
+
+          $updaterBundle = Get-ChildItem $nsisDir -Filter "*.nsis.zip" -File | Select-Object -First 1
+          if (-not $updaterBundle) {
+            throw "未找到 Tauri 更新包（*.nsis.zip）。请确认 createUpdaterArtifacts=true 且签名密钥有效。"
+          }
+
+          $signaturePath = "$($updaterBundle.FullName).sig"
+          if (-not (Test-Path $signaturePath)) {
+            throw "未找到更新签名：$signaturePath"
+          }
 
           $tag = "v$env:DESKEMY_ZH_VERSION-zh-CN"
-          $assetName = $installer.Name
-          $encodedAssetName = [Uri]::EscapeDataString($assetName)
-          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$encodedAssetName"
+          $updaterAssetName = $updaterBundle.Name
+          $encodedUpdaterAssetName = [Uri]::EscapeDataString($updaterAssetName)
+          $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$encodedUpdaterAssetName"
           $signature = (Get-Content $signaturePath -Raw).Trim()
           $notes = @(
             $env:RELEASE_NOTES
@@ -175,12 +184,15 @@ jobs:
 
           $notesPath = Join-Path $out "RELEASE_NOTES.md"
           $notes | Set-Content -Path $notesPath -Encoding utf8NoBOM
+
           Copy-Item $installer.FullName $out
+          Copy-Item $updaterBundle.FullName $out
           Copy-Item $signaturePath $out
           Copy-Item "deskemy/LOCALIZATION_REPORT.md" $out
 
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "installer=$($installer.Name)" >> $env:GITHUB_OUTPUT
+          "updater_bundle=$($updaterBundle.Name)" >> $env:GITHUB_OUTPUT
           "portable=$([IO.Path]::GetFileName($portableZip))" >> $env:GITHUB_OUTPUT
 
       - name: 创建中文版 GitHub Release
@@ -197,7 +209,8 @@ jobs:
           $args = @(
             "release", "create", $tag,
             "release-output/${{ steps.release_meta.outputs.installer }}",
-            "release-output/${{ steps.release_meta.outputs.installer }}.sig",
+            "release-output/${{ steps.release_meta.outputs.updater_bundle }}",
+            "release-output/${{ steps.release_meta.outputs.updater_bundle }}.sig",
             "release-output/${{ steps.release_meta.outputs.portable }}",
             "release-output/latest.json",
             "release-output/LOCALIZATION_REPORT.md",
@@ -220,3 +233,5 @@ jobs:
           path: |
             release-output/latest.json
             release-output/LOCALIZATION_REPORT.md
+            release-output/*.nsis.zip
+            release-output/*.sig
