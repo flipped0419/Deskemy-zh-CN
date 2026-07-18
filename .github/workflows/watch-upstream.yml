@@ -1,0 +1,282 @@
+name: 跟踪上游正式版并发布测试构建
+
+on:
+  schedule:
+    # 每天 01:30 UTC（北京时间 09:30）检查一次。
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "留空则使用上游最新正式 Release；也可手动指定标签、分支或提交"
+        required: false
+        default: ""
+        type: string
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/watch-upstream.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: deskemy-zh-upstream-test
+  cancel-in-progress: false
+
+env:
+  INITIAL_UPSTREAM_BASELINE: v1.1.0
+
+jobs:
+  detect:
+    name: 检查上游正式版
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.detect.outputs.should_build }}
+      upstream_ref: ${{ steps.detect.outputs.upstream_ref }}
+      test_tag: ${{ steps.detect.outputs.test_tag }}
+      safe_ref: ${{ steps.detect.outputs.safe_ref }}
+    steps:
+      - name: 获取上游版本并判断是否已构建
+        id: detect
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_REF: ${{ inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${REQUESTED_REF:-}" ]]; then
+            upstream_ref="$REQUESTED_REF"
+            manual=true
+          else
+            upstream_ref="$(gh api repos/NFRohan/Deskemy/releases/latest --jq '.tag_name')"
+            manual=false
+          fi
+
+          if [[ -z "$upstream_ref" || "$upstream_ref" == "null" ]]; then
+            echo "无法取得上游正式版标签" >&2
+            exit 1
+          fi
+
+          safe_ref="$(printf '%s' "$upstream_ref" | sed -E 's/[^A-Za-z0-9._-]+/-/g')"
+          test_tag="test-${safe_ref}-zh-CN"
+          should_build=true
+
+          if gh release view "$test_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "测试 Release $test_tag 已存在，跳过。"
+            should_build=false
+          elif [[ "$manual" == "false" && "$upstream_ref" == "$INITIAL_UPSTREAM_BASELINE" ]]; then
+            echo "上游仍是当前已知基线 $INITIAL_UPSTREAM_BASELINE，跳过。"
+            should_build=false
+          fi
+
+          echo "upstream_ref=$upstream_ref" >> "$GITHUB_OUTPUT"
+          echo "safe_ref=$safe_ref" >> "$GITHUB_OUTPUT"
+          echo "test_tag=$test_tag" >> "$GITHUB_OUTPUT"
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+
+          echo "上游版本：$upstream_ref"
+          echo "测试标签：$test_tag"
+          echo "是否构建：$should_build"
+
+  build-test:
+    name: 构建并发布上游测试版
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 75
+    env:
+      UPSTREAM_REF: ${{ needs.detect.outputs.upstream_ref }}
+      SAFE_REF: ${{ needs.detect.outputs.safe_ref }}
+      TEST_TAG: ${{ needs.detect.outputs.test_tag }}
+
+    steps:
+      - name: 检出汉化仓库
+        uses: actions/checkout@v4
+        with:
+          path: localization
+          persist-credentials: false
+
+      - name: 检出上游源码
+        uses: actions/checkout@v4
+        with:
+          repository: NFRohan/Deskemy
+          ref: ${{ env.UPSTREAM_REF }}
+          path: deskemy
+          fetch-depth: 1
+          lfs: true
+          persist-credentials: false
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 设置 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: deskemy/src-tauri -> target
+
+      - name: 应用简体中文汉化和兼容补丁
+        shell: pwsh
+        run: |
+          node localization/scripts/localize-zh.mjs deskemy
+          node localization/scripts/fix-build.mjs deskemy
+
+      - name: 安装前端依赖
+        working-directory: deskemy
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
+
+      - name: 检查前端代码
+        working-directory: deskemy
+        shell: pwsh
+        run: |
+          npx svelte-kit sync
+          npx svelte-check --tsconfig ./tsconfig.json --threshold error
+
+      - name: 构建 Windows NSIS 安装包
+        working-directory: deskemy
+        shell: pwsh
+        run: npm run tauri build -- --bundles nsis
+
+      - name: 整理测试构建产物
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "test-release-output"
+          $portable = Join-Path $out "Deskemy-zh-CN-test-portable"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+
+          $exe = Get-ChildItem "deskemy/src-tauri/target/release" -Filter "deskemy.exe" -File | Select-Object -First 1
+          if (-not $exe) { throw "未找到 deskemy.exe" }
+          Copy-Item $exe.FullName (Join-Path $portable "Deskemy.exe")
+
+          $mpv = "deskemy/src-tauri/vendor/libmpv-2.dll"
+          if (-not (Test-Path $mpv)) { throw "未找到 libmpv-2.dll" }
+          Copy-Item $mpv $portable
+
+          New-Item -ItemType File -Force -Path (Join-Path $portable ".portable") | Out-Null
+          Copy-Item "deskemy/LICENSE" $portable
+          if (Test-Path "deskemy/src-tauri/licenses") {
+            Copy-Item "deskemy/src-tauri/licenses" (Join-Path $portable "licenses") -Recurse
+          }
+
+          $portableZip = Join-Path $out "Deskemy_$env:SAFE_REF`_zh-CN_test_portable.zip"
+          Compress-Archive -Path "$portable/*", (Join-Path $portable ".portable") -DestinationPath $portableZip -Force
+
+          $installer = Get-ChildItem "deskemy/src-tauri/target/release/bundle/nsis" -Filter "*-setup.exe" -File | Select-Object -First 1
+          if (-not $installer) { throw "未找到 NSIS 安装包" }
+          Copy-Item $installer.FullName (Join-Path $out "Deskemy_$env:SAFE_REF`_zh-CN_test_setup.exe")
+          Copy-Item "deskemy/LOCALIZATION_REPORT.md" $out
+
+          @"
+          # Deskemy 中文版自动测试构建
+
+          - 上游版本：`$env:UPSTREAM_REF`
+          - 构建来源：上游最新正式 Release 自动检测
+          - 发布通道：GitHub Prerelease（测试频道）
+
+          > 此版本未经完整人工验证，仅用于测试新的上游版本、检查汉化规则和运行兼容性。
+          >
+          > 本测试构建关闭应用内更新，不会成为中文版稳定更新源，也不会通过现有 updater 推送给稳定版用户。
+          >
+          > 安装测试前建议先在 Deskemy 中导出备份。安装版通常会继承原数据，但测试版本仍可能存在上游兼容问题。
+
+          维护者应重点检查：
+
+          1. `LOCALIZATION_REPORT.md` 中的新英文文案和未命中规则；
+          2. 安装、启动、课程导入、视频播放和数据继承；
+          3. Svelte、Tauri、libmpv 和 Windows 运行兼容性；
+          4. 明显误译、按钮错位和运行时英文。
+          "@ | Set-Content -Path (Join-Path $out "RELEASE_NOTES.md") -Encoding utf8NoBOM
+
+      - name: 创建测试频道 Prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $assets = Get-ChildItem "test-release-output" -File |
+            Where-Object { $_.Name -ne "RELEASE_NOTES.md" } |
+            ForEach-Object { $_.FullName }
+
+          $args = @(
+            "release", "create", $env:TEST_TAG
+          ) + $assets + @(
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--target", $env:GITHUB_SHA,
+            "--title", "Deskemy 中文版测试构建（上游 $env:UPSTREAM_REF）",
+            "--notes-file", "test-release-output/RELEASE_NOTES.md",
+            "--prerelease"
+          )
+
+          & gh @args
+          if ($LASTEXITCODE -ne 0) { throw "创建测试频道 Prerelease 失败" }
+
+      - name: 关闭该版本的失败 Issue
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `自动测试构建失败：${process.env.UPSTREAM_REF}`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            }
+
+      - name: 记录测试构建失败
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `自动测试构建失败：${process.env.UPSTREAM_REF}`;
+            const body = [
+              `上游版本：${process.env.UPSTREAM_REF}`,
+              '',
+              `运行：${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '自动测试构建没有发布为 Prerelease。请打开运行日志，检查汉化规则、前端检查或 Tauri 构建错误。',
+            ].join('\n');
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'all',
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                state: 'open',
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+            }
