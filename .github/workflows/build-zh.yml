@@ -1,0 +1,126 @@
+name: 构建 Deskemy 中文版
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/build-zh.yml"
+      - "TRANSLATION_NOTES.md"
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "官方 Deskemy 标签、分支或提交"
+        required: true
+        default: "v1.1.0"
+        type: string
+
+env:
+  UPSTREAM_REF: ${{ inputs.upstream_ref || 'v1.1.0' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Windows 中文构建
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 检出汉化仓库
+        uses: actions/checkout@v4
+        with:
+          path: localization
+          persist-credentials: false
+
+      - name: 检出官方 Deskemy 源码
+        uses: actions/checkout@v4
+        with:
+          repository: NFRohan/Deskemy
+          ref: ${{ env.UPSTREAM_REF }}
+          path: deskemy
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 设置 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: deskemy/src-tauri -> target
+
+      - name: 应用简体中文汉化
+        shell: pwsh
+        run: node localization/scripts/localize-zh.mjs deskemy
+
+      - name: 安装前端依赖
+        working-directory: deskemy
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) {
+            npm ci
+          } else {
+            npm install
+          }
+
+      - name: 检查前端代码
+        working-directory: deskemy
+        run: npm run check
+
+      - name: 构建 NSIS 安装包
+        working-directory: deskemy
+        run: npm run tauri build -- --bundles nsis
+
+      - name: 制作便携版
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "output"
+          $portable = Join-Path $out "Deskemy-zh-CN-portable"
+          New-Item -ItemType Directory -Force -Path $portable | Out-Null
+
+          $exe = Get-ChildItem "deskemy/src-tauri/target/release" -Filter "deskemy.exe" -File | Select-Object -First 1
+          if (-not $exe) { throw "未找到 deskemy.exe" }
+          Copy-Item $exe.FullName (Join-Path $portable "Deskemy.exe")
+
+          $mpv = "deskemy/src-tauri/vendor/libmpv-2.dll"
+          if (-not (Test-Path $mpv)) { throw "未找到 libmpv-2.dll" }
+          Copy-Item $mpv $portable
+
+          New-Item -ItemType File -Force -Path (Join-Path $portable ".portable") | Out-Null
+          Copy-Item "deskemy/LICENSE" $portable
+          if (Test-Path "deskemy/src-tauri/licenses") {
+            Copy-Item "deskemy/src-tauri/licenses" (Join-Path $portable "licenses") -Recurse
+          }
+
+          $zip = Join-Path $out "Deskemy_${{ env.UPSTREAM_REF }}_zh-CN_portable.zip"
+          Compress-Archive -Path "$portable/*", (Join-Path $portable ".portable") -DestinationPath $zip -Force
+
+      - name: 整理构建结果
+        id: meta
+        shell: pwsh
+        run: |
+          $safe = "${{ env.UPSTREAM_REF }}" -replace '[^A-Za-z0-9._-]', '-'
+          "suffix=$safe" >> $env:GITHUB_OUTPUT
+
+          Write-Host "NSIS 安装包："
+          Get-ChildItem "deskemy/src-tauri/target/release/bundle/nsis" -File -ErrorAction SilentlyContinue
+          Write-Host "便携版："
+          Get-ChildItem "output" -File -ErrorAction SilentlyContinue
+
+      - name: 上传中文版构建
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deskemy-${{ steps.meta.outputs.suffix }}-zh-CN
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            deskemy/src-tauri/target/release/bundle/nsis/*.exe
+            output/*.zip
+            deskemy/LOCALIZATION_REPORT.md
