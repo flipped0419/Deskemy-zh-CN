@@ -148,7 +148,7 @@ jobs:
 
           $updaterBundle = Get-ChildItem $nsisDir -Filter "*.nsis.zip" -File | Select-Object -First 1
           if (-not $updaterBundle) {
-            throw "未找到 Tauri 更新包（*.nsis.zip）。请确认 createUpdaterArtifacts=true 且签名密钥有效。"
+            throw "未找到 Tauri 更新包（*.nsis.zip）。请确认 createUpdaterArtifacts=v1Compatible 且签名密钥有效。"
           }
 
           $signaturePath = "$($updaterBundle.FullName).sig"
@@ -219,7 +219,11 @@ jobs:
             "--title", "Deskemy 中文版 $env:DESKEMY_ZH_VERSION",
             "--notes-file", "release-output/RELEASE_NOTES.md"
           )
-          if ("${{ inputs.draft }}" -eq "true") { $args += "--draft" }
+          if ("${{ inputs.draft }}" -eq "true") {
+            $args += "--draft"
+          } else {
+            $args += "--latest"
+          }
           & gh @args
           if ($LASTEXITCODE -ne 0) { throw "创建 GitHub Release 失败" }
 
