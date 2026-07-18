@@ -61,10 +61,28 @@ patchText("src/routes/settings/+page.svelte", [
   ['re-index anytime with "Index subtitle text" above.', "随时可以使用上方的“索引字幕文本”重新建立。"],
 ]);
 
+patchText("src/routes/course/[id]/+page.svelte", [
+  [
+    /<span class="text-headline-sm text-on-surface truncate">\{section\.title\}<\/span>/,
+    '<span class="text-headline-sm text-on-surface truncate">{section.title === "Introduction" ? "导言" : section.title}</span>',
+    "课程详情页兜底章节名称",
+  ],
+]);
+
 patchText("src/routes/watch/[lectureId]/+page.svelte", [
   [
     />\s*Content\s*<\/button>/,
     ">\n                课程目录\n              </button>",
     "播放器侧栏课程目录标签",
+  ],
+  [
+    "{currentSection.title}",
+    '{currentSection.title === "Introduction" ? "导言" : currentSection.title}',
+    "播放器当前章节兜底名称",
+  ],
+  [
+    "{section.title}",
+    '{section.title === "Introduction" ? "导言" : section.title}',
+    "播放器课程目录兜底章节名称",
   ],
 ]);
