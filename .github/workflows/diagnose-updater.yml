@@ -128,12 +128,14 @@ jobs:
               });
             }
 
-      - name: 上传检查日志
+      - name: 上传检查日志和转换源码
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: updater-svelte-check
-          path: updater-svelte-check.log
+          path: |
+            updater-svelte-check.log
+            deskemy/src/routes/watch/[lectureId]/+page.svelte
           retention-days: 14
 
       - name: 检查失败
