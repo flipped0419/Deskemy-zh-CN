@@ -157,3 +157,4 @@ patchRequired(
 await ensureLibmpv();
 await import("./feedback-fixes.mjs");
 await import("./feedback-round2.mjs");
+await import("./localize-v1.2.mjs");
