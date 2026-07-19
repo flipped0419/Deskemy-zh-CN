@@ -11,10 +11,16 @@ on:
         required: false
         default: ""
         type: string
+      force_rebuild:
+        description: "删除同标签测试 Release 后重新构建"
+        required: true
+        default: false
+        type: boolean
   push:
     branches: ["main"]
     paths:
       - ".github/workflows/watch-upstream.yml"
+      - "scripts/**"
 
 permissions:
   contents: write
@@ -37,12 +43,13 @@ jobs:
       test_tag: ${{ steps.detect.outputs.test_tag }}
       safe_ref: ${{ steps.detect.outputs.safe_ref }}
     steps:
-      - name: 获取上游版本并判断是否已构建
+      - name: 获取上游版本并判断是否需要构建
         id: detect
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_REF: ${{ inputs.upstream_ref }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild || 'false' }}
         run: |
           set -euo pipefail
 
@@ -62,13 +69,24 @@ jobs:
           safe_ref="$(printf '%s' "$upstream_ref" | sed -E 's/[^A-Za-z0-9._-]+/-/g')"
           test_tag="test-${safe_ref}-zh-CN"
           should_build=true
+          force="${FORCE_REBUILD:-false}"
 
-          if gh release view "$test_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "测试 Release $test_tag 已存在，跳过。"
+          # 汉化或兼容脚本变化时，自动替换当前上游版本的测试构建。
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            force=true
+          fi
+
+          if [[ "$manual" == "false" && "$upstream_ref" == "$INITIAL_UPSTREAM_BASELINE" ]]; then
+            echo "上游仍是初始基线 $INITIAL_UPSTREAM_BASELINE，跳过。"
             should_build=false
-          elif [[ "$manual" == "false" && "$upstream_ref" == "$INITIAL_UPSTREAM_BASELINE" ]]; then
-            echo "上游仍是当前已知基线 $INITIAL_UPSTREAM_BASELINE，跳过。"
-            should_build=false
+          elif gh release view "$test_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$force" == "true" ]]; then
+              echo "删除旧测试 Release $test_tag，准备重新构建。"
+              gh release delete "$test_tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            else
+              echo "测试 Release $test_tag 已存在，跳过。"
+              should_build=false
+            fi
           fi
 
           echo "upstream_ref=$upstream_ref" >> "$GITHUB_OUTPUT"
@@ -78,6 +96,7 @@ jobs:
 
           echo "上游版本：$upstream_ref"
           echo "测试标签：$test_tag"
+          echo "强制重建：$force"
           echo "是否构建：$should_build"
 
   build-test:
@@ -182,21 +201,16 @@ jobs:
           # Deskemy 中文版自动测试构建
 
           - 上游版本：`$env:UPSTREAM_REF`
-          - 构建来源：上游最新正式 Release 自动检测
           - 发布通道：GitHub Prerelease（测试频道）
+          - 构建提交：`$env:GITHUB_SHA`
 
-          > 此版本未经完整人工验证，仅用于测试新的上游版本、检查汉化规则和运行兼容性。
+          > 此版本未经完整人工验证，仅用于测试新上游版本、汉化规则和运行兼容性。
           >
-          > 本测试构建关闭应用内更新，不会成为中文版稳定更新源，也不会通过现有 updater 推送给稳定版用户。
+          > 测试构建关闭应用内更新，不会成为稳定更新源，也不会推送给稳定版用户。
           >
-          > 安装测试前建议先在 Deskemy 中导出备份。安装版通常会继承原数据，但测试版本仍可能存在上游兼容问题。
+          > 安装测试前建议先在 Deskemy 中导出备份。
 
-          维护者应重点检查：
-
-          1. `LOCALIZATION_REPORT.md` 中的新英文文案和未命中规则；
-          2. 安装、启动、课程导入、视频播放和数据继承；
-          3. Svelte、Tauri、libmpv 和 Windows 运行兼容性；
-          4. 明显误译、按钮错位和运行时英文。
+          请重点检查安装、启动、数据继承、课程导入、视频播放、新增设置、课程文件夹重新定位、书签弹窗以及 `LOCALIZATION_REPORT.md`。
           "@ | Set-Content -Path (Join-Path $out "RELEASE_NOTES.md") -Encoding utf8NoBOM
 
       - name: 创建测试频道 Prerelease
@@ -255,7 +269,7 @@ jobs:
               '',
               `运行：${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               '',
-              '自动测试构建没有发布为 Prerelease。请打开运行日志，检查汉化规则、前端检查或 Tauri 构建错误。',
+              '自动测试构建没有发布为 Prerelease。请检查汉化规则、前端检查或 Tauri 构建错误。',
             ].join('\n');
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
